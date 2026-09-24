@@ -30,7 +30,7 @@ UPDATE_CACHE_DIR="/var/cache/fwmgr"
 UPDATE_CACHE_FILE="${UPDATE_CACHE_DIR}/update-check"
 UPDATE_CACHE_TTL=21600
 # Перед публикацией при необходимости измените только эту строку.
-GITHUB_REPOSITORY="MaXaoH/fwmgr"
+GITHUB_REPOSITORY="MaXa0H/fwmgr"
 RELEASE_BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download"
 LATEST_VERSION=""
 UPDATE_AVAILABLE=0
