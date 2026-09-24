@@ -228,8 +228,8 @@ download_url() {
 }
 
 download_latest_script() {
-    local dest="$1" vfile="$TMP_DIR/latest.VERSION" sumfile="$TMP_DIR/latest.SHA256SUMS"
-    local latest embedded expected actual
+    local dest="$1" vfile="$TMP_DIR/latest.VERSION"
+    local latest embedded
     download_url "${RELEASE_BASE_URL}/VERSION" "$vfile" || { err "Не удалось получить VERSION с GitHub."; return 1; }
     latest="$(tr -d ' \t\r\n' < "$vfile")"
     [[ "$latest" =~ ^[0-9]+([.][0-9A-Za-z+-]+)+$ ]] || { err "Некорректный VERSION в релизе: $latest"; return 1; }
@@ -238,16 +238,6 @@ download_latest_script() {
     embedded="$(extract_script_version "$dest" || true)"
     [[ "$embedded" == "$latest" ]] || { err "Версия в fwmgr.sh ($embedded) не совпадает с VERSION ($latest)."; return 1; }
 
-    # SHA256SUMS является дополнительной проверкой целостности релизного asset.
-    if download_url "${RELEASE_BASE_URL}/SHA256SUMS" "$sumfile"; then
-        expected="$(awk '$2=="fwmgr.sh" || $2=="*fwmgr.sh" {print $1; exit}' "$sumfile" 2>/dev/null || true)"
-        if [[ -n "$expected" ]]; then
-            actual="$(sha256sum "$dest" | awk '{print $1}')"
-            [[ "$actual" == "$expected" ]] || { err "SHA256 скачанного fwmgr.sh не совпадает с SHA256SUMS."; return 1; }
-        else
-            warn "В SHA256SUMS не найдена запись fwmgr.sh; продолжение после bash -n и проверки VERSION."
-        fi
-    fi
     LATEST_VERSION="$latest"
     return 0
 }
