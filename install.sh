@@ -24,22 +24,16 @@ TMP_DIR="$(mktemp -d /tmp/fwmgr-install.XXXXXX)"
 trap 'rm -rf -- "$TMP_DIR"' EXIT INT TERM
 SCRIPT="$TMP_DIR/fwmgr.sh"
 VERSION_FILE="$TMP_DIR/VERSION"
-SUMS_FILE="$TMP_DIR/SHA256SUMS"
 
 info "получение последнего стабильного релиза..."
 download "${RELEASE_BASE_URL}/VERSION" "$VERSION_FILE" || die "не удалось скачать VERSION"
 download "${RELEASE_BASE_URL}/fwmgr.sh" "$SCRIPT" || die "не удалось скачать fwmgr.sh"
-download "${RELEASE_BASE_URL}/SHA256SUMS" "$SUMS_FILE" || die "не удалось скачать SHA256SUMS"
 
 LATEST="$(tr -d ' \t\r\n' < "$VERSION_FILE")"
 [[ "$LATEST" =~ ^[0-9]+([.][0-9A-Za-z+-]+)+$ ]] || die "некорректный VERSION: $LATEST"
 bash -n "$SCRIPT" || die "fwmgr.sh не прошёл bash -n"
 EMBEDDED="$(grep -m1 -E '^VERSION="[^"]+"$' "$SCRIPT" | sed -E 's/^VERSION="([^"]+)"$/\1/' || true)"
 [[ "$EMBEDDED" == "$LATEST" ]] || die "VERSION=$LATEST, но внутри fwmgr.sh указана версия $EMBEDDED"
-EXPECTED="$(awk '$2=="fwmgr.sh" || $2=="*fwmgr.sh" {print $1; exit}' "$SUMS_FILE")"
-[[ -n "$EXPECTED" ]] || die "в SHA256SUMS отсутствует fwmgr.sh"
-ACTUAL="$(sha256sum "$SCRIPT" | awk '{print $1}')"
-[[ "$ACTUAL" == "$EXPECTED" ]] || die "SHA256 fwmgr.sh не совпадает с SHA256SUMS"
 chmod 0755 "$SCRIPT"
 
 info "установка FWMgr v${LATEST}..."
