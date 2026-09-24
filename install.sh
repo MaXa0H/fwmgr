@@ -2,7 +2,7 @@
 # FWMgr bootstrap installer. Downloads and installs the latest stable release.
 set -euo pipefail
 
-GITHUB_REPOSITORY="MaXaoH/fwmgr"
+GITHUB_REPOSITORY="MaXa0H/fwmgr"
 RELEASE_BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download"
 
 die() { printf 'FWMgr installer: %s\n' "$*" >&2; exit 1; }
