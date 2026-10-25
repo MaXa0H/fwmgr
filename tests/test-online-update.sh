@@ -37,6 +37,10 @@ cat > "$tmp/bin/nft" <<'MOCK'
 #!/usr/bin/env bash
 if [[ "$1" == "list" ]]; then
     [[ -f "$TEST_NFT_EXISTS" ]] || exit 1
+    if [[ "${2:-}" == "tables" ]]; then
+        printf "table inet fwmgr\n"
+        exit 0
+    fi
     printf 'table inet fwmgr { chain input { type filter hook input priority 100; policy accept; } }\n'
 elif [[ "$1" == "-c" ]]; then
     exit 0
