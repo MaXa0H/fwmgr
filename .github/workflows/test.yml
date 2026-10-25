@@ -1,0 +1,20 @@
+name: Test FWMgr
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  online-update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Bash syntax and version
+        run: |
+          bash -n fwmgr.sh
+          bash -n install.sh
+          bash -n tests/test-online-update.sh
+          test "$(cat VERSION)" = "$(sed -n 's/^VERSION="\([^"]*\)"$/\1/p' fwmgr.sh | head -1)"
+      - name: Mocked integration tests (isolated CI runner)
+        run: sudo env CI=true bash tests/test-online-update.sh
