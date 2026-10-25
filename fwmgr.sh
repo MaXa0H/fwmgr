@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# FireWall Manager v0.2.0 by MaXaoH
+# FireWall Manager v0.3.0 by MaXaoH
 # Ubuntu-oriented interactive manager for host INPUT filtering via UFW or nftables.
 
 set -uo pipefail
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 FORMAT_VERSION="2"
 APP_TITLE="FireWall Manager v${VERSION} by MaXaoH"
 
@@ -522,22 +522,26 @@ online_cache_dir() {
 }
 
 load_online_cache() {
-    local kind="$1" urls_name out_name dir url h line norm
+    local kind="$1" urls_name out_name dir url h line
     if [[ "$kind" == "blacklist" ]]; then
         urls_name="BLACK_URLS"; out_name="ONLINE_BLACKLIST"
     else
         urls_name="WHITE_URLS"; out_name="ONLINE_WHITELIST"
     fi
     local -n urls="$urls_name" out="$out_name"
+    local -A seen=()
     out=()
     dir="$(online_cache_dir "$kind")"
     for url in "${urls[@]}"; do
         h="$(url_hash "$url")"
         [[ -f "$dir/${h}.list" ]] || continue
+        # Online caches are normalized by parse_online_download. Do not fork
+        # Python for every address and do not scan the growing array for dupes.
         while IFS= read -r line || [[ -n "$line" ]]; do
             [[ -n "$line" ]] || continue
-            if norm="$(normalize_entry "$line" 2>/dev/null)"; then
-                array_has_exact "$out_name" "$norm" || out+=("$norm")
+            if [[ -z "${seen[$line]+x}" ]]; then
+                seen["$line"]=1
+                out+=("$line")
             fi
         done < "$dir/${h}.list"
     done
@@ -549,10 +553,15 @@ build_effective_list() {
     [[ "$kind" == "blacklist" ]] && { manual_name="BLACKLIST"; online_name="ONLINE_BLACKLIST"; enabled="$BLACK_ONLINE_ENABLED"; } \
                                   || { manual_name="WHITELIST"; online_name="ONLINE_WHITELIST"; enabled="$WHITE_ONLINE_ENABLED"; }
     local -n manual="$manual_name" online="$online_name" out="$out_name"
+    local -A seen=()
     out=()
-    for x in "${manual[@]}"; do array_has_exact "$out_name" "$x" || out+=("$x"); done
+    for x in "${manual[@]}"; do
+        if [[ -z "${seen[$x]+x}" ]]; then seen["$x"]=1; out+=("$x"); fi
+    done
     if [[ "$enabled" == "1" ]]; then
-        for x in "${online[@]}"; do array_has_exact "$out_name" "$x" || out+=("$x"); done
+        for x in "${online[@]}"; do
+            if [[ -z "${seen[$x]+x}" ]]; then seen["$x"]=1; out+=("$x"); fi
+        done
     fi
     sort_array "$out_name"
 }
@@ -642,19 +651,35 @@ PYPARSE
 }
 
 refresh_online_kind() {
-    local kind="$1" quiet="${2:-0}" urls_name dir url h raw parsed stats valid invalid
+    local kind="$1" quiet="${2:-0}" skip_load="${3:-0}" urls_name dir url h raw parsed stats valid invalid
     [[ "$kind" == "blacklist" ]] && urls_name="BLACK_URLS" || urls_name="WHITE_URLS"
     local -n urls="$urls_name"
     dir="$(online_cache_dir "$kind")"
     mkdir -p "$dir"; chmod 700 "$ONLINE_ROOT" "$dir" 2>/dev/null || true
     local success=0 failed=0 retained=0
+    ONLINE_CACHE_CHANGED=0
     for url in "${urls[@]}"; do
         h="$(url_hash "$url")"
         raw="$TMP_DIR/online-${kind}-${h}.raw"
         parsed="$TMP_DIR/online-${kind}-${h}.list"
         if download_online_url "$url" "$raw" 2>"$TMP_DIR/online-${h}.err" && stats="$(parse_online_download "$raw" "$parsed" 2>>"$TMP_DIR/online-${h}.err")"; then
             read -r valid invalid <<< "$stats"
-            install -m 600 "$parsed" "$dir/${h}.list"
+            if [[ -f "$dir/${h}.list" ]] && cmp -s "$parsed" "$dir/${h}.list"; then
+                success=$((success+1))
+                if [[ "$quiet" != "1" ]]; then gray "Без изменений: $url (${valid:-0} записей)"; fi
+                continue
+            fi
+            # Persist the need to apply *before* replacing the cache: a crash or
+            # failed firewall reload must not lose the retry on the next minute.
+            if [[ "$RUN_MODE" == "online-update" && "$MODE" == "$kind" ]]; then
+                touch "$ONLINE_ROOT/${kind}.pending" || return 1
+            fi
+            if ! install -m 600 "$parsed" "$dir/${h}.list"; then
+                failed=$((failed+1))
+                [[ "$quiet" != "1" ]] && err "Не удалось сохранить кэш: $url"
+                continue
+            fi
+            ONLINE_CACHE_CHANGED=1
             {
                 printf 'URL=%s\n' "$url"
                 printf 'UPDATED=%s\n' "$(date -Is)"
@@ -674,7 +699,7 @@ refresh_online_kind() {
             fi
         fi
     done
-    load_online_cache "$kind"
+    [[ "$skip_load" == "1" ]] || load_online_cache "$kind"
     [[ "$quiet" == "1" ]] || msg "Источники: успешно $success; ошибок $failed; старый кэш сохранен для $retained."
     (( failed == 0 ))
 }
@@ -694,7 +719,7 @@ prune_online_cache() {
     shopt -u nullglob
 }
 
-load_state() {
+load_config() {
     local k v
     MODE="off" ACTION="drop" BACKEND="" UFW_ENABLED_BY_FWMGR="0"
     BLACK_ONLINE_ENABLED="0" WHITE_ONLINE_ENABLED="0"
@@ -713,12 +738,32 @@ load_state() {
             esac
         done < "$CONFIG_FILE"
     fi
+}
+
+# Timers only need the selected online URL list and basic configuration.
+# Loading thousands of cached entries on an unchanged poll is wasteful.
+load_timer_state() {
+    local kind="$1"
+    load_config
+    if [[ "$kind" == "blacklist" ]]; then
+        load_url_file "$BLACK_URLS_FILE" BLACK_URLS
+    else
+        load_url_file "$WHITE_URLS_FILE" WHITE_URLS
+    fi
+}
+
+load_state() {
+    local only_kind="${1:-}"
+    load_config
     load_list_file "$BLACKLIST_FILE" BLACKLIST
     load_list_file "$WHITELIST_FILE" WHITELIST
     load_url_file "$BLACK_URLS_FILE" BLACK_URLS
     load_url_file "$WHITE_URLS_FILE" WHITE_URLS
-    load_online_cache blacklist
-    load_online_cache whitelist
+    case "$only_kind" in
+        blacklist) load_online_cache blacklist ;;
+        whitelist) load_online_cache whitelist ;;
+        *) load_online_cache blacklist; load_online_cache whitelist ;;
+    esac
     SAVED_MODE="$MODE"; SAVED_ACTION="$ACTION"; SAVED_BACKEND="$BACKEND"
     SAVED_UFW_ENABLED_BY_FWMGR="$UFW_ENABLED_BY_FWMGR"
     SAVED_BLACKLIST=("${BLACKLIST[@]}")
@@ -1338,13 +1383,13 @@ generate_ufw_rules_file() {
     if [[ "$MODE" == "blacklist" ]]; then
         # Белый список имеет приоритет как исключение из blacklist, в том числе для защиты SSH от онлайн-источников.
         for entry in "${WHITELIST[@]}"; do
-            ver="$(entry_ip_version "$entry")" || continue
+            ver=4; [[ "$entry" == *:* ]] && ver=6
             [[ "$ver" == "$family" ]] || continue
             printf '%s\n' "-A ${UFW_CHAIN} -s ${entry} -j RETURN" >> "$out"
         done
         build_effective_list blacklist effective
         for entry in "${effective[@]}"; do
-            ver="$(entry_ip_version "$entry")" || continue
+            ver=4; [[ "$entry" == *:* ]] && ver=6
             [[ "$ver" == "$family" ]] || continue
             if [[ "$ACTION" == "drop" ]]; then
                 printf '%s\n' "-A ${UFW_CHAIN} -m conntrack --ctstate NEW -s ${entry} -j DROP" >> "$out"
@@ -1355,7 +1400,7 @@ generate_ufw_rules_file() {
     elif [[ "$MODE" == "whitelist" ]]; then
         build_effective_list whitelist effective
         for entry in "${effective[@]}"; do
-            ver="$(entry_ip_version "$entry")" || continue
+            ver=4; [[ "$entry" == *:* ]] && ver=6
             [[ "$ver" == "$family" ]] || continue
             printf '%s\n' "-A ${UFW_CHAIN} -s ${entry} -j RETURN" >> "$out"
         done
@@ -1457,12 +1502,12 @@ table inet ${NFT_TABLE_NAME} {
 NFT
     if [[ "$MODE" == "blacklist" ]]; then
         for entry in "${WHITELIST[@]}"; do
-            ver="$(entry_ip_version "$entry")" || continue
+            ver=4; [[ "$entry" == *:* ]] && ver=6
             if [[ "$ver" == "4" ]]; then printf '        ip saddr %s accept\n' "$entry" >> "$out"; else printf '        ip6 saddr %s accept\n' "$entry" >> "$out"; fi
         done
         build_effective_list blacklist effective
         for entry in "${effective[@]}"; do
-            ver="$(entry_ip_version "$entry")" || continue
+            ver=4; [[ "$entry" == *:* ]] && ver=6
             if [[ "$ver" == "4" ]]; then
                 printf '        ct state new ip saddr %s %s\n' "$entry" "$verdict" >> "$out"
             else
@@ -1472,7 +1517,7 @@ NFT
     elif [[ "$MODE" == "whitelist" ]]; then
         build_effective_list whitelist effective
         for entry in "${effective[@]}"; do
-            ver="$(entry_ip_version "$entry")" || continue
+            ver=4; [[ "$entry" == *:* ]] && ver=6
             if [[ "$ver" == "4" ]]; then printf '        ip saddr %s accept\n' "$entry" >> "$out"; else printf '        ip6 saddr %s accept\n' "$entry" >> "$out"; fi
         done
         printf '        ct state new %s\n' "$verdict" >> "$out"
@@ -1630,21 +1675,41 @@ sync_online_timers() {
 }
 
 run_online_update() {
-    local kind="$1" enabled urls_name active_mode
+    local kind="$1" enabled urls_name active_mode pending
     if [[ "$kind" == "blacklist" ]]; then enabled="$BLACK_ONLINE_ENABLED"; urls_name="BLACK_URLS"; active_mode="blacklist"; else enabled="$WHITE_ONLINE_ENABLED"; urls_name="WHITE_URLS"; active_mode="whitelist"; fi
     local -n urls="$urls_name"
     [[ "$enabled" == "1" && ${#urls[@]} -gt 0 ]] || return 0
-    refresh_online_kind "$kind" 0 || true
+    pending="$ONLINE_ROOT/${kind}.pending"
+    # Download/normalize once, then compare with the last-known-good file.
+    # Do not load large Bash arrays unless applying rules is actually needed.
+    refresh_online_kind "$kind" 0 1 || true
     prune_online_cache "$kind"
-    if [[ "$MODE" != "$active_mode" ]]; then return 0; fi
+    [[ "$MODE" == "$active_mode" ]] || return 0
+
+    if (( ONLINE_CACHE_CHANGED == 0 )) && [[ ! -e "$pending" ]]; then
+        case "$BACKEND" in
+            nftables) nft list table "$NFT_TABLE_FAMILY" "$NFT_TABLE_NAME" >/dev/null 2>&1 && return 0 ;;
+            ufw) if iptables -n -L "$UFW_CHAIN" >/dev/null 2>&1 && ip6tables -n -L "$UFW_CHAIN" >/dev/null 2>&1; then return 0; fi ;;
+        esac
+    fi
+
+    load_state "$kind"
     detect_firewalls
     if (( HAS_CONFLICT )); then err "Онлайн-списки обновлены, но firewall не применен из-за конфликта: $CONFLICT_TEXT"; return 1; fi
     [[ -n "$BACKEND" ]] || BACKEND="$RESOLVED_BACKEND"
+    local rc=1
     case "$BACKEND" in
-        ufw) apply_ufw ;;
-        nftables) apply_nftables ;;
+        ufw) apply_ufw && rc=0 ;;
+        nftables) apply_nftables && rc=0 ;;
         *) err "Онлайн-списки обновлены, но backend firewall не определен."; return 1 ;;
     esac
+    if (( rc == 0 )); then
+        rm -f -- "$pending"
+        return 0
+    fi
+    # A failed apply must be retried even if the next HTTP response is identical.
+    touch "$pending" 2>/dev/null || true
+    return 1
 }
 
 save_settings() {
@@ -1681,6 +1746,8 @@ save_settings() {
     fi
     prune_online_cache blacklist
     prune_online_cache whitelist
+    # Saving applies the current effective policy, including online caches.
+    rm -f -- "$ONLINE_ROOT/blacklist.pending" "$ONLINE_ROOT/whitelist.pending"
     if ! sync_online_timers; then
         warn "Настройки firewall сохранены, но не удалось полностью настроить systemd-таймеры онлайн-списков."
     fi
@@ -2087,6 +2154,12 @@ if [[ "$RUN_MODE" == "self-update" ]]; then
     exit 0
 fi
 
+if [[ "$RUN_MODE" == "online-update" ]]; then
+    load_timer_state "$UPDATE_KIND"
+    run_online_update "$UPDATE_KIND"
+    exit $?
+fi
+
 detect_current_ip
 load_state
 
@@ -2094,11 +2167,6 @@ if [[ "$RUN_MODE" == "uninstall" ]]; then
     uninstall_fwmgr
     exit $?
 fi
-if [[ "$RUN_MODE" == "online-update" ]]; then
-    run_online_update "$UPDATE_KIND"
-    exit $?
-fi
-
 # Ошибка/недоступность GitHub никак не мешает запуску менеджера.
 check_for_updates 0 >/dev/null 2>&1 || true
 main_loop
