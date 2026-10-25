@@ -9,16 +9,19 @@ FWMgr работает с **UFW** и **nftables**, поддерживает IPv4
 
 ## Быстрая установка
 
+Установка использует проверенную основную ветку `main`; релизные assets для v0.3.0 пока не опубликованы. Для обновления уже установленного v0.2.0 скачайте `fwmgr.sh` из `main` и запустите его как локальный файл: встроенный установщик предложит обновление. В последующих версиях `sudo fwmgr --update` обращается к `main`.
+
+
 Через curl:
 
 ```bash
-curl -fsSL https://github.com/MaXa0H/fwmgr/releases/latest/download/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/MaXa0H/fwmgr/main/install.sh | bash
 ```
 
 Через wget:
 
 ```bash
-wget -qO- https://github.com/MaXa0H/fwmgr/releases/latest/download/install.sh | bash
+wget -qO- https://raw.githubusercontent.com/MaXa0H/fwmgr/main/install.sh | bash
 ```
 
 После установки:

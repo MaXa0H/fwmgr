@@ -31,7 +31,7 @@ UPDATE_CACHE_FILE="${UPDATE_CACHE_DIR}/update-check"
 UPDATE_CACHE_TTL=21600
 # Перед публикацией при необходимости измените только эту строку.
 GITHUB_REPOSITORY="MaXa0H/fwmgr"
-RELEASE_BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download"
+SOURCE_BASE_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main"
 LATEST_VERSION=""
 UPDATE_AVAILABLE=0
 NFT_UNIT="/etc/systemd/system/fwmgr-nft.service"
@@ -230,10 +230,10 @@ download_url() {
 download_latest_script() {
     local dest="$1" vfile="$TMP_DIR/latest.VERSION"
     local latest embedded
-    download_url "${RELEASE_BASE_URL}/VERSION" "$vfile" || { err "Не удалось получить VERSION с GitHub."; return 1; }
+    download_url "${SOURCE_BASE_URL}/VERSION" "$vfile" || { err "Не удалось получить VERSION из ветки main."; return 1; }
     latest="$(tr -d ' \t\r\n' < "$vfile")"
-    [[ "$latest" =~ ^[0-9]+([.][0-9A-Za-z+-]+)+$ ]] || { err "Некорректный VERSION в релизе: $latest"; return 1; }
-    download_url "${RELEASE_BASE_URL}/fwmgr.sh" "$dest" || { err "Не удалось скачать fwmgr.sh с GitHub."; return 1; }
+    [[ "$latest" =~ ^[0-9]+([.][0-9A-Za-z+-]+)+$ ]] || { err "Некорректный VERSION в ветке main: $latest"; return 1; }
+    download_url "${SOURCE_BASE_URL}/fwmgr.sh" "$dest" || { err "Не удалось скачать fwmgr.sh с GitHub."; return 1; }
     bash -n "$dest" || { err "Скачанный fwmgr.sh не прошёл bash -n."; return 1; }
     embedded="$(extract_script_version "$dest" || true)"
     [[ "$embedded" == "$latest" ]] || { err "Версия в fwmgr.sh ($embedded) не совпадает с VERSION ($latest)."; return 1; }
@@ -307,7 +307,7 @@ install_requested_version() {
         install_system_script "$src"
         return $?
     fi
-    info "Получение последнего стабильного релиза FWMgr..."
+    info "Получение актуальной версии FWMgr из main..."
     download_latest_script "$downloaded" || return 1
     install_system_script "$downloaded"
 }
@@ -323,7 +323,7 @@ check_for_updates() {
     if [[ "$force" != "1" && -n "$cached" && $((now-checked)) -lt $UPDATE_CACHE_TTL ]]; then
         LATEST_VERSION="$cached"
     else
-        if download_url "${RELEASE_BASE_URL}/VERSION" "$vfile"; then
+        if download_url "${SOURCE_BASE_URL}/VERSION" "$vfile"; then
             cached="$(tr -d ' \t\r\n' < "$vfile")"
             if [[ "$cached" =~ ^[0-9]+([.][0-9A-Za-z+-]+)+$ ]]; then
                 LATEST_VERSION="$cached"
@@ -350,7 +350,7 @@ print_title() {
 
 self_update_from_github() {
     local downloaded="$TMP_DIR/fwmgr-update.sh" newver
-    info "Проверка последнего стабильного релиза..."
+    info "Проверка актуальной версии FWMgr в main..."
     if ! download_latest_script "$downloaded"; then return 1; fi
     newver="$LATEST_VERSION"
     if ! version_is_newer "$newver" "$VERSION"; then
@@ -662,41 +662,51 @@ refresh_online_kind() {
         h="$(url_hash "$url")"
         raw="$TMP_DIR/online-${kind}-${h}.raw"
         parsed="$TMP_DIR/online-${kind}-${h}.list"
-        if download_online_url "$url" "$raw" 2>"$TMP_DIR/online-${h}.err" && stats="$(parse_online_download "$raw" "$parsed" 2>>"$TMP_DIR/online-${h}.err")"; then
-            read -r valid invalid <<< "$stats"
-            if [[ -f "$dir/${h}.list" ]] && cmp -s "$parsed" "$dir/${h}.list"; then
+        if download_online_url "$url" "$raw" 2>"$TMP_DIR/online-${h}.err"; then
+            # Compare byte-identical validated sources before parsing large lists.
+            if [[ -f "$dir/${h}.list" && -f "$dir/${h}.raw" ]] && cmp -s "$raw" "$dir/${h}.raw"; then
                 success=$((success+1))
-                if [[ "$quiet" != "1" ]]; then gray "Без изменений: $url (${valid:-0} записей)"; fi
+                [[ "$quiet" == "1" ]] || gray "Без изменений: $url"
                 continue
             fi
-            # Persist the need to apply *before* replacing the cache: a crash or
-            # failed firewall reload must not lose the retry on the next minute.
-            if [[ "$RUN_MODE" == "online-update" && "$MODE" == "$kind" ]]; then
-                touch "$ONLINE_ROOT/${kind}.pending" || return 1
-            fi
-            if ! install -m 600 "$parsed" "$dir/${h}.list"; then
-                failed=$((failed+1))
-                [[ "$quiet" != "1" ]] && err "Не удалось сохранить кэш: $url"
+            if stats="$(parse_online_download "$raw" "$parsed" 2>>"$TMP_DIR/online-${h}.err")"; then
+                read -r valid invalid <<< "$stats"
+                # Persist validated raw input even if only order/comments changed.
+                if [[ -f "$dir/${h}.list" ]] && cmp -s "$parsed" "$dir/${h}.list"; then
+                    install -m 600 "$raw" "$dir/${h}.raw" || return 1
+                    success=$((success+1))
+                    [[ "$quiet" == "1" ]] || gray "Без изменений: $url (${valid:-0} записей)"
+                    continue
+                fi
+                # Persist retry intent before replacing the normalized cache.
+                if [[ "$RUN_MODE" == "online-update" && "$MODE" == "$kind" ]]; then
+                    touch "$ONLINE_ROOT/${kind}.pending" || return 1
+                fi
+                if ! install -m 600 "$parsed" "$dir/${h}.list"; then
+                    failed=$((failed+1))
+                    [[ "$quiet" == "1" ]] || err "Не удалось сохранить кэш: $url"
+                    continue
+                fi
+                ONLINE_CACHE_CHANGED=1
+                install -m 600 "$raw" "$dir/${h}.raw" || true
+                {
+                    printf 'URL=%s\n' "$url"
+                    printf 'UPDATED=%s\n' "$(date -Is)"
+                    printf 'COUNT=%s\n' "${valid:-0}"
+                    printf 'INVALID=%s\n' "${invalid:-0}"
+                } > "$dir/${h}.meta"
+                chmod 600 "$dir/${h}.meta"
+                success=$((success+1))
+                if [[ "$quiet" != "1" ]]; then ok "Обновлен источник: $url (${valid:-0} записей, пропущено некорректных: ${invalid:-0})"; fi
                 continue
             fi
-            ONLINE_CACHE_CHANGED=1
-            {
-                printf 'URL=%s\n' "$url"
-                printf 'UPDATED=%s\n' "$(date -Is)"
-                printf 'COUNT=%s\n' "${valid:-0}"
-                printf 'INVALID=%s\n' "${invalid:-0}"
-            } > "$dir/${h}.meta"
-            chmod 600 "$dir/${h}.meta"
-            success=$((success+1))
-            if [[ "$quiet" != "1" ]]; then ok "Обновлен источник: $url (${valid:-0} записей, пропущено некорректных: ${invalid:-0})"; fi
-        else
-            failed=$((failed+1))
-            [[ -f "$dir/${h}.list" ]] && retained=$((retained+1))
-            if [[ "$quiet" != "1" ]]; then
-                err "Не удалось обновить: $url"
-                [[ -s "$TMP_DIR/online-${h}.err" ]] && sed -n '1,3p' "$TMP_DIR/online-${h}.err" >&2
-                [[ -f "$dir/${h}.list" ]] && warn "Сохранен предыдущий кэш этого источника."
-            fi
+        fi
+        failed=$((failed+1))
+        [[ -f "$dir/${h}.list" ]] && retained=$((retained+1))
+        if [[ "$quiet" != "1" ]]; then
+            err "Не удалось обновить: $url"
+            [[ -s "$TMP_DIR/online-${h}.err" ]] && sed -n '1,3p' "$TMP_DIR/online-${h}.err" >&2
+            [[ -f "$dir/${h}.list" ]] && warn "Сохранен предыдущий кэш этого источника."
         fi
     done
     [[ "$skip_load" == "1" ]] || load_online_cache "$kind"
@@ -711,7 +721,7 @@ prune_online_cache() {
     dir="$(online_cache_dir "$kind")"
     [[ -d "$dir" ]] || return 0
     shopt -s nullglob
-    for f in "$dir"/*.list "$dir"/*.meta; do
+    for f in "$dir"/*.list "$dir"/*.meta "$dir"/*.raw; do
         base="$(basename "$f")"; base="${base%.*}"; keep=0
         for url in "${urls[@]}"; do h="$(url_hash "$url")"; [[ "$h" == "$base" ]] && { keep=1; break; }; done
         (( keep )) || rm -f -- "$f"
@@ -1688,7 +1698,7 @@ run_online_update() {
 
     if (( ONLINE_CACHE_CHANGED == 0 )) && [[ ! -e "$pending" ]]; then
         case "$BACKEND" in
-            nftables) nft list table "$NFT_TABLE_FAMILY" "$NFT_TABLE_NAME" >/dev/null 2>&1 && return 0 ;;
+            nftables) nft list tables 2>/dev/null | grep -Fxq "table ${NFT_TABLE_FAMILY} ${NFT_TABLE_NAME}" && return 0 ;;
             ufw) if iptables -n -L "$UFW_CHAIN" >/dev/null 2>&1 && ip6tables -n -L "$UFW_CHAIN" >/dev/null 2>&1; then return 0; fi ;;
         esac
     fi
@@ -2134,7 +2144,7 @@ if [[ "$RUN_MODE" == "interactive" ]]; then
                 exec "$INSTALL_SCRIPT"
             fi
         else
-            info "Потоковый запуск используется только как установщик. Получение последнего релиза..."
+            info "Потоковый запуск используется только как установщик. Получение актуальной версии..."
             install_requested_version || exit $?
             ok "Установка завершена. Для запуска используйте: sudo fwmgr"
             exit 0
@@ -2147,8 +2157,8 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 1
 fi
 
-# CLI-обновление всегда получает опубликованный stable release; локальный более новый файл
-# обновляет систему автоматически через ветку выше.
+# CLI-обновление получает версию из основной ветки репозитория;
+# ранее установленные версии могут также обновляться локально скачанным файлом.
 if [[ "$RUN_MODE" == "self-update" ]]; then
     self_update_from_github || exit $?
     exit 0
