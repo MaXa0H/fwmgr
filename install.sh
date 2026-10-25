@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# FWMgr bootstrap installer. Downloads and installs the latest stable release.
+# FWMgr bootstrap installer. Downloads and installs the current main branch version.
 set -euo pipefail
 
 GITHUB_REPOSITORY="MaXa0H/fwmgr"
-RELEASE_BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download"
+SOURCE_BASE_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main"
 
 die() { printf 'FWMgr installer: %s\n' "$*" >&2; exit 1; }
 info() { printf 'FWMgr installer: %s\n' "$*"; }
@@ -25,9 +25,9 @@ trap 'rm -rf -- "$TMP_DIR"' EXIT INT TERM
 SCRIPT="$TMP_DIR/fwmgr.sh"
 VERSION_FILE="$TMP_DIR/VERSION"
 
-info "получение последнего стабильного релиза..."
-download "${RELEASE_BASE_URL}/VERSION" "$VERSION_FILE" || die "не удалось скачать VERSION"
-download "${RELEASE_BASE_URL}/fwmgr.sh" "$SCRIPT" || die "не удалось скачать fwmgr.sh"
+info "получение актуальной версии из main..."
+download "${SOURCE_BASE_URL}/VERSION" "$VERSION_FILE" || die "не удалось скачать VERSION"
+download "${SOURCE_BASE_URL}/fwmgr.sh" "$SCRIPT" || die "не удалось скачать fwmgr.sh"
 
 LATEST="$(tr -d ' \t\r\n' < "$VERSION_FILE")"
 [[ "$LATEST" =~ ^[0-9]+([.][0-9A-Za-z+-]+)+$ ]] || die "некорректный VERSION: $LATEST"
